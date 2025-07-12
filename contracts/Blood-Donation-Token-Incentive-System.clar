@@ -4,6 +4,7 @@
 (define-constant err-already-registered (err u102))
 (define-constant err-invalid-amount (err u103))
 (define-constant err-too-soon (err u104))
+(define-constant err-achievement-claimed (err u105))
 
 (define-data-var token-name (string-ascii 32) "BloodToken")
 (define-data-var token-symbol (string-ascii 10) "BLD")
@@ -16,6 +17,7 @@
         last-donation: uint,
         total-donations: uint,
         eligible: bool,
+        achievements-claimed: (list 4 uint),
     }
 )
 
@@ -51,6 +53,7 @@
             last-donation: u0,
             total-donations: u0,
             eligible: true,
+            achievements-claimed: (list),
         }))
     )
 )
@@ -75,6 +78,7 @@
             last-donation: current-time,
             total-donations: (+ (get total-donations donor-info) u1),
             eligible: true,
+            achievements-claimed: (get achievements-claimed donor-info),
         }))
     )
 )
@@ -114,5 +118,70 @@
     (begin
         (asserts! (is-eq tx-sender contract-owner) err-owner-only)
         (ok (var-set tokens-per-donation new-amount))
+    )
+)
+
+(define-read-only (get-achievement-milestone (milestone uint))
+    (if (is-eq milestone u5)
+        u50
+        (if (is-eq milestone u10)
+            u150
+            (if (is-eq milestone u25)
+                u400
+                (if (is-eq milestone u50)
+                    u1000
+                    u0
+                )
+            )
+        )
+    )
+)
+
+(define-read-only (is-milestone-eligible (donations uint))
+    (or
+        (is-eq donations u5)
+        (is-eq donations u10)
+        (is-eq donations u25)
+        (is-eq donations u50)
+    )
+)
+
+(define-read-only (has-claimed-achievement
+        (donor principal)
+        (milestone uint)
+    )
+    (match (map-get? donors donor)
+        donor-data (is-some (index-of (get achievements-claimed donor-data) milestone))
+        false
+    )
+)
+
+(define-public (claim-achievement (milestone uint))
+    (let (
+            (donor tx-sender)
+            (donor-info (unwrap! (map-get? donors donor) err-not-registered))
+            (total-donations (get total-donations donor-info))
+            (bonus-tokens (get-achievement-milestone milestone))
+        )
+        (asserts! (is-milestone-eligible milestone) err-invalid-amount)
+        (asserts! (>= total-donations milestone) err-invalid-amount)
+        (asserts! (not (has-claimed-achievement donor milestone))
+            err-achievement-claimed
+        )
+        (map-set balances donor
+            (+ (default-to u0 (map-get? balances donor)) bonus-tokens)
+        )
+        (ok (map-set donors donor {
+            last-donation: (get last-donation donor-info),
+            total-donations: total-donations,
+            eligible: (get eligible donor-info),
+            achievements-claimed: (unwrap!
+                (as-max-len?
+                    (append (get achievements-claimed donor-info) milestone)
+                    u4
+                )
+                err-invalid-amount
+            ),
+        }))
     )
 )
