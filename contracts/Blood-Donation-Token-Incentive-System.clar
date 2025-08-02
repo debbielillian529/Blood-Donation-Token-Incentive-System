@@ -5,6 +5,7 @@
 (define-constant err-invalid-amount (err u103))
 (define-constant err-too-soon (err u104))
 (define-constant err-achievement-claimed (err u105))
+(define-constant err-invalid-streak (err u106))
 
 (define-data-var token-name (string-ascii 32) "BloodToken")
 (define-data-var token-symbol (string-ascii 10) "BLD")
@@ -18,6 +19,8 @@
         total-donations: uint,
         eligible: bool,
         achievements-claimed: (list 4 uint),
+        current-streak: uint,
+        longest-streak: uint,
     }
 )
 
@@ -54,6 +57,8 @@
             total-donations: u0,
             eligible: true,
             achievements-claimed: (list),
+            current-streak: u0,
+            longest-streak: u0,
         }))
     )
 )
@@ -74,12 +79,28 @@
             (+ (default-to u0 (map-get? balances donor))
                 (var-get tokens-per-donation)
             ))
-        (ok (map-set donors donor {
-            last-donation: current-time,
-            total-donations: (+ (get total-donations donor-info) u1),
-            eligible: true,
-            achievements-claimed: (get achievements-claimed donor-info),
-        }))
+        (let (
+                (time-since-last (- current-time (get last-donation donor-info)))
+                (streak-window u17280)
+                (current-streak (get current-streak donor-info))
+                (new-streak (if (<= time-since-last streak-window)
+                    (+ current-streak u1)
+                    u1
+                ))
+                (longest-streak (get longest-streak donor-info))
+            )
+            (ok (map-set donors donor {
+                last-donation: current-time,
+                total-donations: (+ (get total-donations donor-info) u1),
+                eligible: true,
+                achievements-claimed: (get achievements-claimed donor-info),
+                current-streak: new-streak,
+                longest-streak: (if (> new-streak longest-streak)
+                    new-streak
+                    longest-streak
+                ),
+            }))
+        )
     )
 )
 
@@ -182,6 +203,63 @@
                 )
                 err-invalid-amount
             ),
+            current-streak: (get current-streak donor-info),
+            longest-streak: (get longest-streak donor-info),
         }))
+    )
+)
+
+(define-read-only (get-streak-bonus (streak uint))
+    (if (>= streak u30)
+        u1000
+        (if (>= streak u20)
+            u500
+            (if (>= streak u10)
+                u200
+                (if (>= streak u5)
+                    u50
+                    u0
+                )
+            )
+        )
+    )
+)
+
+(define-read-only (is-streak-milestone (streak uint))
+    (or
+        (is-eq streak u5)
+        (is-eq streak u10)
+        (is-eq streak u20)
+        (is-eq streak u30)
+    )
+)
+
+(define-read-only (get-donor-streak (donor principal))
+    (match (map-get? donors donor)
+        donor-data
+        {
+            current-streak: (get current-streak donor-data),
+            longest-streak: (get longest-streak donor-data),
+        }
+        {
+            current-streak: u0,
+            longest-streak: u0,
+        }
+    )
+)
+
+(define-public (claim-streak-bonus)
+    (let (
+            (donor tx-sender)
+            (donor-info (unwrap! (map-get? donors donor) err-not-registered))
+            (current-streak (get current-streak donor-info))
+            (bonus-tokens (get-streak-bonus current-streak))
+        )
+        (asserts! (> bonus-tokens u0) err-invalid-streak)
+        (asserts! (is-streak-milestone current-streak) err-invalid-streak)
+        (map-set balances donor
+            (+ (default-to u0 (map-get? balances donor)) bonus-tokens)
+        )
+        (ok true)
     )
 )
