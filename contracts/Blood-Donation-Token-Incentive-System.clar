@@ -6,11 +6,13 @@
 (define-constant err-too-soon (err u104))
 (define-constant err-achievement-claimed (err u105))
 (define-constant err-invalid-streak (err u106))
+(define-constant err-donation-expired (err u107))
 
 (define-data-var token-name (string-ascii 32) "BloodToken")
 (define-data-var token-symbol (string-ascii 10) "BLD")
 (define-data-var token-uri (optional (string-utf8 256)) none)
 (define-data-var tokens-per-donation uint u100)
+(define-data-var donation-validity-period uint u172800)
 
 (define-map donors
     principal
@@ -21,6 +23,7 @@
         achievements-claimed: (list 4 uint),
         current-streak: uint,
         longest-streak: uint,
+        recent-donations: uint,
     }
 )
 
@@ -59,6 +62,7 @@
             achievements-claimed: (list),
             current-streak: u0,
             longest-streak: u0,
+            recent-donations: u0,
         }))
     )
 )
@@ -99,6 +103,7 @@
                     new-streak
                     longest-streak
                 ),
+                recent-donations: (+ (get recent-donations donor-info) u1),
             }))
         )
     )
@@ -139,6 +144,13 @@
     (begin
         (asserts! (is-eq tx-sender contract-owner) err-owner-only)
         (ok (var-set tokens-per-donation new-amount))
+    )
+)
+
+(define-public (update-donation-validity-period (new-period uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (ok (var-set donation-validity-period new-period))
     )
 )
 
@@ -185,7 +197,9 @@
             (bonus-tokens (get-achievement-milestone milestone))
         )
         (asserts! (is-milestone-eligible milestone) err-invalid-amount)
-        (asserts! (>= total-donations milestone) err-invalid-amount)
+        (asserts! (>= (get-valid-donation-count donor) milestone)
+            err-donation-expired
+        )
         (asserts! (not (has-claimed-achievement donor milestone))
             err-achievement-claimed
         )
@@ -205,7 +219,54 @@
             ),
             current-streak: (get current-streak donor-info),
             longest-streak: (get longest-streak donor-info),
+            recent-donations: (get recent-donations donor-info),
         }))
+    )
+)
+
+(define-read-only (is-donation-valid (donation-time uint))
+    (let ((current-time burn-block-height))
+        (< (- current-time donation-time) (var-get donation-validity-period))
+    )
+)
+
+(define-read-only (get-valid-donation-count (donor principal))
+    (match (map-get? donors donor)
+        donor-data (let (
+                (validity-period (var-get donation-validity-period))
+                (current-time burn-block-height)
+                (last-donation (get last-donation donor-data))
+            )
+            (if (is-donation-valid last-donation)
+                (get recent-donations donor-data)
+                u0
+            )
+        )
+        u0
+    )
+)
+
+(define-public (expire-old-donations (donor principal))
+    (match (map-get? donors donor)
+        donor-data (let (
+                (current-time burn-block-height)
+                (last-donation (get last-donation donor-data))
+                (validity-period (var-get donation-validity-period))
+            )
+            (if (not (is-donation-valid last-donation))
+                (ok (map-set donors donor {
+                    last-donation: (get last-donation donor-data),
+                    total-donations: (get total-donations donor-data),
+                    eligible: (get eligible donor-data),
+                    achievements-claimed: (get achievements-claimed donor-data),
+                    current-streak: (get current-streak donor-data),
+                    longest-streak: (get longest-streak donor-data),
+                    recent-donations: u0,
+                }))
+                (ok true)
+            )
+        )
+        err-not-registered
     )
 )
 
