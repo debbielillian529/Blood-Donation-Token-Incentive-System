@@ -7,12 +7,15 @@
 (define-constant err-achievement-claimed (err u105))
 (define-constant err-invalid-streak (err u106))
 (define-constant err-donation-expired (err u107))
+(define-constant err-invalid-referrer (err u108))
+(define-constant err-self-referral (err u109))
 
 (define-data-var token-name (string-ascii 32) "BloodToken")
 (define-data-var token-symbol (string-ascii 10) "BLD")
 (define-data-var token-uri (optional (string-utf8 256)) none)
 (define-data-var tokens-per-donation uint u100)
 (define-data-var donation-validity-period uint u172800)
+(define-data-var referral-bonus-percentage uint u10)
 
 (define-map donors
     principal
@@ -30,6 +33,15 @@
 (define-map balances
     principal
     uint
+)
+
+(define-map referrals
+    principal
+    {
+        referrer: (optional principal),
+        referral-count: uint,
+        referral-rewards: uint,
+    }
 )
 
 (define-read-only (get-name)
@@ -52,9 +64,64 @@
     (ok (map-get? donors donor))
 )
 
+(define-read-only (get-referral-info (donor principal))
+    (ok (map-get? referrals donor))
+)
+
+(define-read-only (get-referral-stats (donor principal))
+    (match (map-get? referrals donor)
+        referral-data (ok {
+            referrer: (get referrer referral-data),
+            referral-count: (get referral-count referral-data),
+            referral-rewards: (get referral-rewards referral-data),
+        })
+        (ok {
+            referrer: none,
+            referral-count: u0,
+            referral-rewards: u0,
+        })
+    )
+)
+
 (define-public (register-donor)
     (let ((donor tx-sender))
         (asserts! (is-none (map-get? donors donor)) err-already-registered)
+        (map-set referrals donor {
+            referrer: none,
+            referral-count: u0,
+            referral-rewards: u0,
+        })
+        (ok (map-set donors donor {
+            last-donation: u0,
+            total-donations: u0,
+            eligible: true,
+            achievements-claimed: (list),
+            current-streak: u0,
+            longest-streak: u0,
+            recent-donations: u0,
+        }))
+    )
+)
+
+(define-public (register-donor-with-referrer (referrer-address principal))
+    (let ((donor tx-sender))
+        (asserts! (is-none (map-get? donors donor)) err-already-registered)
+        (asserts! (not (is-eq donor referrer-address)) err-self-referral)
+        (asserts! (is-some (map-get? donors referrer-address))
+            err-invalid-referrer
+        )
+        (let ((referrer-data (unwrap! (map-get? referrals referrer-address) err-invalid-referrer)))
+            (map-set referrals referrer-address {
+                referrer: (get referrer referrer-data),
+                referral-count: (+ (get referral-count referrer-data) u1),
+                referral-rewards: (get referral-rewards referrer-data),
+            })
+        )
+        (map-set referrals donor {
+            referrer: (some referrer-address),
+            referral-count: u0,
+            referral-rewards: u0,
+        })
         (ok (map-set donors donor {
             last-donation: u0,
             total-donations: u0,
@@ -83,6 +150,33 @@
             (+ (default-to u0 (map-get? balances donor))
                 (var-get tokens-per-donation)
             ))
+        (match (map-get? referrals donor)
+            referral-data (match (get referrer referral-data)
+                referrer-address (let (
+                        (referral-bonus (/
+                            (* (var-get tokens-per-donation)
+                                (var-get referral-bonus-percentage)
+                            )
+                            u100
+                        ))
+                        (ref-data (unwrap! (map-get? referrals referrer-address)
+                            err-invalid-referrer
+                        ))
+                    )
+                    (map-set balances referrer-address
+                        (+ (default-to u0 (map-get? balances referrer-address))
+                            referral-bonus
+                        ))
+                    (map-set referrals referrer-address {
+                        referrer: (get referrer ref-data),
+                        referral-count: (get referral-count ref-data),
+                        referral-rewards: (+ (get referral-rewards ref-data) referral-bonus),
+                    })
+                )
+                true
+            )
+            true
+        )
         (let (
                 (time-since-last (- current-time (get last-donation donor-info)))
                 (streak-window u17280)
@@ -151,6 +245,14 @@
     (begin
         (asserts! (is-eq tx-sender contract-owner) err-owner-only)
         (ok (var-set donation-validity-period new-period))
+    )
+)
+
+(define-public (update-referral-bonus-percentage (new-percentage uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (<= new-percentage u100) err-invalid-amount)
+        (ok (var-set referral-bonus-percentage new-percentage))
     )
 )
 
