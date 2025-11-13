@@ -9,6 +9,9 @@
 (define-constant err-donation-expired (err u107))
 (define-constant err-invalid-referrer (err u108))
 (define-constant err-self-referral (err u109))
+(define-constant err-paused (err u110))
+
+(define-data-var paused bool false)
 
 (define-data-var token-name (string-ascii 32) "BloodToken")
 (define-data-var token-symbol (string-ascii 10) "BLD")
@@ -83,122 +86,156 @@
     )
 )
 
+(define-read-only (is-paused)
+    (ok (var-get paused))
+)
+
+(define-public (pause)
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (ok (var-set paused true))
+    )
+)
+
+(define-public (unpause)
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (ok (var-set paused false))
+    )
+)
+
 (define-public (register-donor)
-    (let ((donor tx-sender))
-        (asserts! (is-none (map-get? donors donor)) err-already-registered)
-        (map-set referrals donor {
-            referrer: none,
-            referral-count: u0,
-            referral-rewards: u0,
-        })
-        (ok (map-set donors donor {
-            last-donation: u0,
-            total-donations: u0,
-            eligible: true,
-            achievements-claimed: (list),
-            current-streak: u0,
-            longest-streak: u0,
-            recent-donations: u0,
-        }))
+    (begin
+        (asserts! (not (var-get paused)) err-paused)
+        (let ((donor tx-sender))
+            (asserts! (is-none (map-get? donors donor)) err-already-registered)
+            (map-set referrals donor {
+                referrer: none,
+                referral-count: u0,
+                referral-rewards: u0,
+            })
+            (ok (map-set donors donor {
+                last-donation: u0,
+                total-donations: u0,
+                eligible: true,
+                achievements-claimed: (list),
+                current-streak: u0,
+                longest-streak: u0,
+                recent-donations: u0,
+            }))
+        )
     )
 )
 
 (define-public (register-donor-with-referrer (referrer-address principal))
-    (let ((donor tx-sender))
-        (asserts! (is-none (map-get? donors donor)) err-already-registered)
-        (asserts! (not (is-eq donor referrer-address)) err-self-referral)
-        (asserts! (is-some (map-get? donors referrer-address))
-            err-invalid-referrer
-        )
-        (let ((referrer-data (unwrap! (map-get? referrals referrer-address) err-invalid-referrer)))
-            (map-set referrals referrer-address {
-                referrer: (get referrer referrer-data),
-                referral-count: (+ (get referral-count referrer-data) u1),
-                referral-rewards: (get referral-rewards referrer-data),
+    (begin
+        (asserts! (not (var-get paused)) err-paused)
+        (let ((donor tx-sender))
+            (asserts! (is-none (map-get? donors donor)) err-already-registered)
+            (asserts! (not (is-eq donor referrer-address)) err-self-referral)
+            (asserts! (is-some (map-get? donors referrer-address))
+                err-invalid-referrer
+            )
+            (let ((referrer-data (unwrap! (map-get? referrals referrer-address)
+                    err-invalid-referrer
+                )))
+                (map-set referrals referrer-address {
+                    referrer: (get referrer referrer-data),
+                    referral-count: (+ (get referral-count referrer-data) u1),
+                    referral-rewards: (get referral-rewards referrer-data),
+                })
+            )
+            (map-set referrals donor {
+                referrer: (some referrer-address),
+                referral-count: u0,
+                referral-rewards: u0,
             })
+            (ok (map-set donors donor {
+                last-donation: u0,
+                total-donations: u0,
+                eligible: true,
+                achievements-claimed: (list),
+                current-streak: u0,
+                longest-streak: u0,
+                recent-donations: u0,
+            }))
         )
-        (map-set referrals donor {
-            referrer: (some referrer-address),
-            referral-count: u0,
-            referral-rewards: u0,
-        })
-        (ok (map-set donors donor {
-            last-donation: u0,
-            total-donations: u0,
-            eligible: true,
-            achievements-claimed: (list),
-            current-streak: u0,
-            longest-streak: u0,
-            recent-donations: u0,
-        }))
     )
 )
 
 (define-public (record-donation)
-    (let (
-            (donor tx-sender)
-            (donor-info (unwrap! (map-get? donors donor) err-not-registered))
-            (current-time burn-block-height)
-            (cooling-period u8640)
-        )
-        (asserts!
-            (>= (- current-time (get last-donation donor-info)) cooling-period)
-            err-too-soon
-        )
-        (asserts! (get eligible donor-info) err-not-registered)
-        (map-set balances donor
-            (+ (default-to u0 (map-get? balances donor))
-                (var-get tokens-per-donation)
-            ))
-        (match (map-get? referrals donor)
-            referral-data (match (get referrer referral-data)
-                referrer-address (let (
-                        (referral-bonus (/
-                            (* (var-get tokens-per-donation)
-                                (var-get referral-bonus-percentage)
-                            )
-                            u100
-                        ))
-                        (ref-data (unwrap! (map-get? referrals referrer-address)
-                            err-invalid-referrer
-                        ))
+    (begin
+        (asserts! (not (var-get paused)) err-paused)
+        (let (
+                (donor tx-sender)
+                (donor-info (unwrap! (map-get? donors donor) err-not-registered))
+                (current-time burn-block-height)
+                (cooling-period u8640)
+            )
+            (asserts!
+                (>= (- current-time (get last-donation donor-info))
+                    cooling-period
+                )
+                err-too-soon
+            )
+            (asserts! (get eligible donor-info) err-not-registered)
+            (map-set balances donor
+                (+ (default-to u0 (map-get? balances donor))
+                    (var-get tokens-per-donation)
+                ))
+            (match (map-get? referrals donor)
+                referral-data (match (get referrer referral-data)
+                    referrer-address (let (
+                            (referral-bonus (/
+                                (* (var-get tokens-per-donation)
+                                    (var-get referral-bonus-percentage)
+                                )
+                                u100
+                            ))
+                            (ref-data (unwrap! (map-get? referrals referrer-address)
+                                err-invalid-referrer
+                            ))
+                        )
+                        (map-set balances referrer-address
+                            (+
+                                (default-to u0
+                                    (map-get? balances referrer-address)
+                                )
+                                referral-bonus
+                            ))
+                        (map-set referrals referrer-address {
+                            referrer: (get referrer ref-data),
+                            referral-count: (get referral-count ref-data),
+                            referral-rewards: (+ (get referral-rewards ref-data) referral-bonus),
+                        })
                     )
-                    (map-set balances referrer-address
-                        (+ (default-to u0 (map-get? balances referrer-address))
-                            referral-bonus
-                        ))
-                    (map-set referrals referrer-address {
-                        referrer: (get referrer ref-data),
-                        referral-count: (get referral-count ref-data),
-                        referral-rewards: (+ (get referral-rewards ref-data) referral-bonus),
-                    })
+                    true
                 )
                 true
             )
-            true
-        )
-        (let (
-                (time-since-last (- current-time (get last-donation donor-info)))
-                (streak-window u17280)
-                (current-streak (get current-streak donor-info))
-                (new-streak (if (<= time-since-last streak-window)
-                    (+ current-streak u1)
-                    u1
-                ))
-                (longest-streak (get longest-streak donor-info))
+            (let (
+                    (time-since-last (- current-time (get last-donation donor-info)))
+                    (streak-window u17280)
+                    (current-streak (get current-streak donor-info))
+                    (new-streak (if (<= time-since-last streak-window)
+                        (+ current-streak u1)
+                        u1
+                    ))
+                    (longest-streak (get longest-streak donor-info))
+                )
+                (ok (map-set donors donor {
+                    last-donation: current-time,
+                    total-donations: (+ (get total-donations donor-info) u1),
+                    eligible: true,
+                    achievements-claimed: (get achievements-claimed donor-info),
+                    current-streak: new-streak,
+                    longest-streak: (if (> new-streak longest-streak)
+                        new-streak
+                        longest-streak
+                    ),
+                    recent-donations: (+ (get recent-donations donor-info) u1),
+                }))
             )
-            (ok (map-set donors donor {
-                last-donation: current-time,
-                total-donations: (+ (get total-donations donor-info) u1),
-                eligible: true,
-                achievements-claimed: (get achievements-claimed donor-info),
-                current-streak: new-streak,
-                longest-streak: (if (> new-streak longest-streak)
-                    new-streak
-                    longest-streak
-                ),
-                recent-donations: (+ (get recent-donations donor-info) u1),
-            }))
         )
     )
 )
@@ -208,13 +245,16 @@
         (sender principal)
         (recipient principal)
     )
-    (let ((sender-balance (default-to u0 (map-get? balances sender))))
-        (asserts! (>= sender-balance amount) err-invalid-amount)
-        (map-set balances sender (- sender-balance amount))
-        (map-set balances recipient
-            (+ (default-to u0 (map-get? balances recipient)) amount)
+    (begin
+        (asserts! (not (var-get paused)) err-paused)
+        (let ((sender-balance (default-to u0 (map-get? balances sender))))
+            (asserts! (>= sender-balance amount) err-invalid-amount)
+            (map-set balances sender (- sender-balance amount))
+            (map-set balances recipient
+                (+ (default-to u0 (map-get? balances recipient)) amount)
+            )
+            (ok true)
         )
-        (ok true)
     )
 )
 
@@ -292,37 +332,40 @@
 )
 
 (define-public (claim-achievement (milestone uint))
-    (let (
-            (donor tx-sender)
-            (donor-info (unwrap! (map-get? donors donor) err-not-registered))
-            (total-donations (get total-donations donor-info))
-            (bonus-tokens (get-achievement-milestone milestone))
+    (begin
+        (asserts! (not (var-get paused)) err-paused)
+        (let (
+                (donor tx-sender)
+                (donor-info (unwrap! (map-get? donors donor) err-not-registered))
+                (total-donations (get total-donations donor-info))
+                (bonus-tokens (get-achievement-milestone milestone))
+            )
+            (asserts! (is-milestone-eligible milestone) err-invalid-amount)
+            (asserts! (>= (get-valid-donation-count donor) milestone)
+                err-donation-expired
+            )
+            (asserts! (not (has-claimed-achievement donor milestone))
+                err-achievement-claimed
+            )
+            (map-set balances donor
+                (+ (default-to u0 (map-get? balances donor)) bonus-tokens)
+            )
+            (ok (map-set donors donor {
+                last-donation: (get last-donation donor-info),
+                total-donations: total-donations,
+                eligible: (get eligible donor-info),
+                achievements-claimed: (unwrap!
+                    (as-max-len?
+                        (append (get achievements-claimed donor-info) milestone)
+                        u4
+                    )
+                    err-invalid-amount
+                ),
+                current-streak: (get current-streak donor-info),
+                longest-streak: (get longest-streak donor-info),
+                recent-donations: (get recent-donations donor-info),
+            }))
         )
-        (asserts! (is-milestone-eligible milestone) err-invalid-amount)
-        (asserts! (>= (get-valid-donation-count donor) milestone)
-            err-donation-expired
-        )
-        (asserts! (not (has-claimed-achievement donor milestone))
-            err-achievement-claimed
-        )
-        (map-set balances donor
-            (+ (default-to u0 (map-get? balances donor)) bonus-tokens)
-        )
-        (ok (map-set donors donor {
-            last-donation: (get last-donation donor-info),
-            total-donations: total-donations,
-            eligible: (get eligible donor-info),
-            achievements-claimed: (unwrap!
-                (as-max-len?
-                    (append (get achievements-claimed donor-info) milestone)
-                    u4
-                )
-                err-invalid-amount
-            ),
-            current-streak: (get current-streak donor-info),
-            longest-streak: (get longest-streak donor-info),
-            recent-donations: (get recent-donations donor-info),
-        }))
     )
 )
 
@@ -349,26 +392,29 @@
 )
 
 (define-public (expire-old-donations (donor principal))
-    (match (map-get? donors donor)
-        donor-data (let (
-                (current-time burn-block-height)
-                (last-donation (get last-donation donor-data))
-                (validity-period (var-get donation-validity-period))
+    (begin
+        (asserts! (not (var-get paused)) err-paused)
+        (match (map-get? donors donor)
+            donor-data (let (
+                    (current-time burn-block-height)
+                    (last-donation (get last-donation donor-data))
+                    (validity-period (var-get donation-validity-period))
+                )
+                (if (not (is-donation-valid last-donation))
+                    (ok (map-set donors donor {
+                        last-donation: (get last-donation donor-data),
+                        total-donations: (get total-donations donor-data),
+                        eligible: (get eligible donor-data),
+                        achievements-claimed: (get achievements-claimed donor-data),
+                        current-streak: (get current-streak donor-data),
+                        longest-streak: (get longest-streak donor-data),
+                        recent-donations: u0,
+                    }))
+                    (ok true)
+                )
             )
-            (if (not (is-donation-valid last-donation))
-                (ok (map-set donors donor {
-                    last-donation: (get last-donation donor-data),
-                    total-donations: (get total-donations donor-data),
-                    eligible: (get eligible donor-data),
-                    achievements-claimed: (get achievements-claimed donor-data),
-                    current-streak: (get current-streak donor-data),
-                    longest-streak: (get longest-streak donor-data),
-                    recent-donations: u0,
-                }))
-                (ok true)
-            )
+            err-not-registered
         )
-        err-not-registered
     )
 )
 
@@ -412,17 +458,20 @@
 )
 
 (define-public (claim-streak-bonus)
-    (let (
-            (donor tx-sender)
-            (donor-info (unwrap! (map-get? donors donor) err-not-registered))
-            (current-streak (get current-streak donor-info))
-            (bonus-tokens (get-streak-bonus current-streak))
+    (begin
+        (asserts! (not (var-get paused)) err-paused)
+        (let (
+                (donor tx-sender)
+                (donor-info (unwrap! (map-get? donors donor) err-not-registered))
+                (current-streak (get current-streak donor-info))
+                (bonus-tokens (get-streak-bonus current-streak))
+            )
+            (asserts! (> bonus-tokens u0) err-invalid-streak)
+            (asserts! (is-streak-milestone current-streak) err-invalid-streak)
+            (map-set balances donor
+                (+ (default-to u0 (map-get? balances donor)) bonus-tokens)
+            )
+            (ok true)
         )
-        (asserts! (> bonus-tokens u0) err-invalid-streak)
-        (asserts! (is-streak-milestone current-streak) err-invalid-streak)
-        (map-set balances donor
-            (+ (default-to u0 (map-get? balances donor)) bonus-tokens)
-        )
-        (ok true)
     )
 )
